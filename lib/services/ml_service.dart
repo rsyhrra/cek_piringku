@@ -364,48 +364,14 @@ class MlService {
   // ─── Simulasi (Fallback) ──────────────────────────────────────────────────
 
   MlAnalysisResult _buildSimulatedResult() {
-    if (_foodDatabase.isEmpty) return _hardcodedFallback();
-
-    final rng = Random();
-    final picked = <FoodItemModel>[];
-    final usedIdx = <int>{};
-    while (picked.length < 3 && usedIdx.length < _foodDatabase.length) {
-      final idx = rng.nextInt(_foodDatabase.length);
-      if (usedIdx.add(idx)) picked.add(_foodDatabase[idx]);
-    }
-
-    final names = picked.map((f) => f.name).toList();
-    final totalCalories = picked.fold(0.0, (s, f) => s + f.calories).round();
-    final totalProteins = picked.fold(0.0, (s, f) => s + f.proteins).round();
-    final totalFat = picked.fold(0.0, (s, f) => s + f.fat).round();
-    final totalCarbs = picked.fold(0.0, (s, f) => s + f.carbohydrate).round();
-
-    final isStandardMet =
-        totalCalories >= 400 && totalCalories <= 900 && totalProteins >= 15;
-
     return MlAnalysisResult(
-      detectedFoods: names,
-      totalCalories: totalCalories,
-      totalProteins: totalProteins,
-      totalFat: totalFat,
-      totalCarbs: totalCarbs,
-      isStandardMet: isStandardMet,
-      topPrediction:
-          Prediction(label: names.first, confidence: 0.85, index: 0),
-      isSimulated: true,
-    );
-  }
-
-  MlAnalysisResult _hardcodedFallback() {
-    return MlAnalysisResult(
-      detectedFoods: ['Nasi Putih', 'Ayam Goreng', 'Sayur Bayam'],
-      totalCalories: 620,
-      totalProteins: 28,
-      totalFat: 18,
-      totalCarbs: 75,
-      isStandardMet: true,
-      topPrediction:
-          Prediction(label: 'Nasi Putih', confidence: 0.85, index: 0),
+      detectedFoods: ['Tidak ada makanan terdeteksi'],
+      totalCalories: 0,
+      totalProteins: 0,
+      totalFat: 0,
+      totalCarbs: 0,
+      isStandardMet: false,
+      topPrediction: Prediction(label: 'Tidak Diketahui', confidence: 0.0, index: -1),
       isSimulated: true,
     );
   }
@@ -471,10 +437,13 @@ List<List<List<List<double>>>> _preprocessImageIsolate(
   final size = args.targetSize;
   
   // 1. Decode compressed JPEG/PNG bytes to raw Image
-  final image = img.decodeImage(args.imageBytes);
+  var image = img.decodeImage(args.imageBytes);
   if (image == null) {
     throw Exception('Failed to decode JPEG/PNG image bytes');
   }
+
+  // Penting: Putar gambar ke orientasi yang benar (tegak lurus) berdasarkan data EXIF
+  image = img.bakeOrientation(image);
 
   // 2. Resize image berkualitas tinggi ke size x size (320x320)
   final resizedImage = img.copyResize(image, width: size, height: size);
