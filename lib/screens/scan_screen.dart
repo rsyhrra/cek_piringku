@@ -1,4 +1,4 @@
-import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
@@ -76,26 +76,35 @@ class _ScanScreenState extends State<ScanScreen> {
       _isAnalyzing = true;
     });
 
-    // Simulate analysis delay
-    await Future.delayed(const Duration(seconds: 2));
+    String imagePath = 'simulated_path';
 
+    // Ambil foto nyata jika kamera tersedia
+    if (_controller != null && _controller!.value.isInitialized) {
+      try {
+        final xFile = await _controller!.takePicture();
+        imagePath = xFile.path;
+      } catch (e) {
+        debugPrint('Gagal capture: $e. Fallback ke simulasi.');
+      }
+    }
+
+    if (!mounted) return;
     final nutritionService = Provider.of<NutritionService>(context, listen: false);
     final rewardService = Provider.of<RewardService>(context, listen: false);
 
-    // Pick a random dummy result for simulation
-    final result = await nutritionService.analyzeMeal("simulated_path");
-    
-    if (mounted) {
-      setState(() {
-        _isAnalyzing = false;
-        _hasResult = true;
-      });
-      
-      await rewardService.addScanReward(result.isStandardMet);
-      
-      if (!result.isStandardMet) {
-        _showAlertBadge();
-      }
+    // Analisis via TFLite + CSV (atau simulasi jika path = simulated_path)
+    final result = await nutritionService.analyzeMeal(imagePath);
+
+    if (!mounted) return;
+    setState(() {
+      _isAnalyzing = false;
+      _hasResult = true;
+    });
+
+    await rewardService.addScanReward(result.isStandardMet);
+
+    if (!result.isStandardMet) {
+      _showAlertBadge();
     }
   }
 

@@ -8,7 +8,8 @@ plugins {
 android {
     namespace = "com.example.cek_piringku"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // tflite_flutter membutuhkan NDK versi spesifik
+    ndkVersion = "26.1.10909125"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -24,7 +25,7 @@ android {
         applicationId = "com.example.cek_piringku"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 21 // tflite_flutter membutuhkan minimal API 21
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -36,6 +37,11 @@ android {
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+
+    // Jangan compress file .tflite agar bisa dimuat oleh TFLite interpreter
+    aaptOptions {
+        noCompress += listOf("tflite")
     }
 }
 
