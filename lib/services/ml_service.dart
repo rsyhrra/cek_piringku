@@ -5,13 +5,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
+import 'package:image/image.dart' as img;
+
 import '../models/food_item_model.dart';
 
 /// Konfigurasi model TFLite.
-/// Sesuaikan jika model Anda berbeda dari asumsi MobileNet 224x224.
+/// Disesuaikan khusus untuk model YOLOv8n-seg yang memiliki input size 320x320.
 class _ModelConfig {
-  /// Ukuran input gambar (lebar & tinggi dalam pixel). Default: 224 (MobileNet).
-  static const int inputSize = 224;
+  /// Ukuran input gambar (lebar & tinggi dalam pixel).
+  /// Model YOLOv8n-seg yang Anda miliki menggunakan input 320x320.
+  static const int inputSize = 320;
 
   /// Path asset model TFLite
   static const String modelPath = 'assets/models/best_float32.tflite';
@@ -19,12 +22,12 @@ class _ModelConfig {
   /// Path asset dataset utama (label + nilai gizi)
   static const String nutritionCsvPath = 'assets/data/nutrition.csv';
 
-  /// Threshold confidence minimum agar hasil diterima (0.0–1.0)
-  static const double confidenceThreshold = 0.30;
+  /// Threshold confidence minimum agar hasil deteksi diterima (0.0–1.0)
+  static const double confidenceThreshold = 0.25;
 }
 
 /// Service utama untuk:
-/// 1. Memuat & menjalankan model TFLite (klasifikasi makanan dari gambar)
+/// 1. Memuat & menjalankan model TFLite (YOLOv8n-seg menu makanan)
 /// 2. Memuat & melakukan lookup dataset CSV (nilai gizi per makanan)
 /// 3. Mengembalikan hasil analisis makanan lengkap
 class MlService {
@@ -40,10 +43,53 @@ class MlService {
 
   bool get isInitialized => _isInitialized;
 
+  /// Daftar Label Kelas dari model YOLOv8n-seg Anda (total 39 kelas)
+  /// yang diekstrak langsung dari metadata model.
+  static const List<String> _modelLabels = [
+    "Acar Timun Wortel",
+    "Anggur",
+    "Apel",
+    "Ayam Goreng",
+    "Ayam Serundeng",
+    "Bakso Saus BBQ",
+    "Capcay",
+    "Chiken Katsu",
+    "Fla Susu",
+    "Gudeg",
+    "Jagung",
+    "Jeruk",
+    "Kacang Merah",
+    "Keju",
+    "Kelengkeng",
+    "Ketimun dan Selada",
+    "Kwetiaw",
+    "Lele Crispy",
+    "Lontong",
+    "Mie",
+    "Nasi",
+    "Nasi Daun Jeruk",
+    "Pepes Tahu",
+    "Pisang",
+    "Pisang Lampung",
+    "Rolade Asam Manis",
+    "Roti",
+    "Salad Buah",
+    "Sawi",
+    "Sayur Isi Pepaya",
+    "Semur Ayam Kecap",
+    "Tahu",
+    "Tahu Crispy",
+    "Telur",
+    "Telur Semur",
+    "Tempe Goreng",
+    "Tempe Sagu",
+    "Tumis Keciwis",
+    "Tumis Koll Wortel"
+  ];
+
   // ─── Inisialisasi ─────────────────────────────────────────────────────────
 
   /// Muat model TFLite dan dataset CSV ke memori.
-  /// Panggil satu kali saat app start (atau lazy di first use).
   Future<void> initialize() async {
     if (_isInitialized) return;
     try {
@@ -67,9 +113,7 @@ class MlService {
 
   Future<void> _loadFoodDatabase() async {
     final raw = await rootBundle.loadString(_ModelConfig.nutritionCsvPath);
-    // CsvToListConverter: eol auto, fieldDelimiter koma
     final rows = const CsvToListConverter(eol: '\n').convert(raw);
-    // Lewati header (baris 0)
     _foodDatabase = rows
         .skip(1)
         .where((row) => row.length >= 6)
@@ -81,16 +125,9 @@ class MlService {
   // ─── Analisis Gambar ──────────────────────────────────────────────────────
 
   /// Analisis gambar makanan dari [imagePath].
-  ///
-  /// Returns:
-  /// - `detectedFoods` : List nama makanan yang terdeteksi (maks 3 teratas)
-  /// - `nutritionData` : Penjumlahan nilai gizi semua makanan yang terdeteksi
-  ///
-  /// Jika model gagal / confidence rendah, fallback ke data representatif dari CSV.
   Future<MlAnalysisResult> analyzeFoodImage(String imagePath) async {
     if (!_isInitialized) await initialize();
 
-    // Jika path adalah simulasi (tidak ada kamera), kembalikan hasil sampling CSV
     if (imagePath == 'simulated_path' || !File(imagePath).existsSync()) {
       return _buildSimulatedResult();
     }
@@ -113,12 +150,15 @@ class MlService {
           totalProteins += food.proteins;
           totalFat += food.fat;
           totalCarbs += food.carbohydrate;
+        } else {
+          // Jika tidak ada di database, gunakan nama dari model langsung
+          detectedFoods.add(pred.label);
         }
       }
 
       if (detectedFoods.isEmpty) return _buildSimulatedResult();
 
-      // Standar BGN: kalori 600–900 kcal, protein ≥15g, sayur hadir
+      // Standar BGN: kalori 400–900 kcal, protein ≥15g
       final isStandardMet = totalCalories >= 400 &&
           totalCalories <= 900 &&
           totalProteins >= 15;
@@ -144,37 +184,124 @@ class MlService {
     final interpreter = _interpreter;
     if (interpreter == null) return [];
 
-    // 1. Load & resize gambar
+    // 1. Load & preprocess gambar ke 320x320
     final imageBytes = await File(imagePath).readAsBytes();
     final inputTensor = await _preprocessImage(imageBytes);
 
-    // 2. Siapkan output buffer
-    // Output shape: [1, numberOfClasses] — float32
-    final outputShape = interpreter.getOutputTensor(0).shape;
-    final numClasses = outputShape.last;
-    final outputBuffer =
-        List.filled(numClasses, 0.0).reshape([1, numClasses]);
+    // 2. Alokasikan buffer secara dinamis untuk multi-output model YOLOv8
+    final outputs = <int, Object>{};
+    final outputTensors = interpreter.getOutputTensors();
 
-    // 3. Jalankan inferensi
-    interpreter.run(inputTensor, outputBuffer);
+    for (int i = 0; i < outputTensors.length; i++) {
+      final shape = outputTensors[i].shape;
+      if (shape.length == 3) {
+        // [1, 75, 2100] untuk YOLOv8 Preds
+        outputs[i] = List.generate(shape[0], (_) => 
+          List.generate(shape[1], (_) => 
+            List.filled(shape[2], 0.0)));
+      } else if (shape.length == 4) {
+        // [1, 32, 160, 160] untuk Prototype Masks
+        outputs[i] = List.generate(shape[0], (_) => 
+          List.generate(shape[1], (_) => 
+            List.generate(shape[2], (_) => 
+              List.filled(shape[3], 0.0))));
+      } else {
+        final size = shape.fold(1, (a, b) => a * b);
+        outputs[i] = List.filled(size, 0.0);
+      }
+    }
 
-    // 4. Parse output → softmax index teratas
-    final scores = outputBuffer[0] as List<double>;
-    return _getTopPredictions(scores, topK: 3);
+    // 3. Jalankan inferensi untuk model multi-output
+    final inputs = [inputTensor];
+    interpreter.runForMultipleInputs(inputs, outputs);
+
+    // 4. Parse YOLOv8 Detection Output (Output 0)
+    final predTensor = outputTensors[0];
+    final predShape = predTensor.shape;
+
+    if (predShape.length == 3) {
+      final rawPreds = outputs[0] as List<List<List<double>>>;
+      final dim1 = predShape[1];
+      final dim2 = predShape[2];
+
+      // Deteksi bentuk transpose (biasanya dim1=75 channel, dim2=2100 anchor)
+      final bool isTransposed = dim1 < dim2;
+      final int channels = isTransposed ? dim1 : dim2;
+      final int anchors = isTransposed ? dim2 : dim1;
+
+      debugPrint('[MlService] Output shape: [$dim1, $dim2], isTransposed=$isTransposed, channels=$channels, anchors=$anchors');
+
+      // Kumpulkan skor TERTINGGI per kelas di semua anchors
+      final classMaxScores = List.filled(_modelLabels.length, -999.0);
+
+      for (int a = 0; a < anchors; a++) {
+        for (int c = 0; c < _modelLabels.length; c++) {
+          final int channelIdx = 4 + c; // Lewati 4 koordinat box awal
+          if (channelIdx >= channels) break;
+
+          final double score = isTransposed
+              ? rawPreds[0][channelIdx][a]
+              : rawPreds[0][a][channelIdx];
+
+          if (score > classMaxScores[c]) {
+            classMaxScores[c] = score;
+          }
+        }
+      }
+
+      // Log top-5 scores untuk debugging (terlihat di flutter run console)
+      final debugList = List.generate(_modelLabels.length, (i) => MapEntry(i, classMaxScores[i]))
+        ..sort((a, b) => b.value.compareTo(a.value));
+      final top5 = debugList.take(5).map((e) => '${_modelLabels[e.key]}=${e.value.toStringAsFixed(3)}').join(', ');
+      debugPrint('[MlService] Top-5 scores: $top5');
+
+      // SELALU ambil prediksi terbaik (tidak ada threshold cutoff)
+      // Urutkan semua kelas dari skor tertinggi ke terendah
+      final sorted = List.generate(_modelLabels.length, (c) => MapEntry(c, classMaxScores[c]))
+        ..sort((a, b) => b.value.compareTo(a.value));
+
+      final result = <Prediction>[];
+
+      // Ambil top-1 SELALU (item utama, apapun score-nya)
+      final top1 = sorted.first;
+      result.add(Prediction(
+        label: _modelLabels[top1.key],
+        confidence: top1.value,
+        index: top1.key,
+      ));
+
+      // Tambahkan item ke-2 dan ke-3 HANYA jika score mereka > 0.50 DAN
+      // sangat dekat (selisih <= 0.20) dengan item utama
+      for (int i = 1; i < sorted.length && result.length < 3; i++) {
+        final entry = sorted[i];
+        if (entry.value >= 0.50 && (top1.value - entry.value) <= 0.20) {
+          result.add(Prediction(
+            label: _modelLabels[entry.key],
+            confidence: entry.value,
+            index: entry.key,
+          ));
+        } else {
+          break; // Sudah tidak ada yang cukup tinggi
+        }
+      }
+
+      debugPrint('[MlService] Returning ${result.length} prediction(s): ${result.map((p) => "${p.label}(${p.confidence.toStringAsFixed(3)})").join(", ")}');
+      return result;
+    } else {
+      // Fallback untuk model klasifikasi standar [1, numClasses]
+      final flatPreds = outputs[0] as List<List<double>>;
+      return _getTopPredictions(flatPreds[0], topK: 1);
+    }
   }
 
   Future<List<List<List<List<double>>>>> _preprocessImage(
       Uint8List imageBytes) async {
-    // Gunakan isolate agar UI tidak freeze
     return compute(_preprocessImageIsolate,
         _PreprocessArgs(imageBytes, _ModelConfig.inputSize));
   }
 
   List<Prediction> _getTopPredictions(List<double> scores, {int topK = 3}) {
-    // Softmax (jika model belum apply)
     final softmaxScores = _softmax(scores);
-
-    // Urutkan index berdasarkan score tertinggi
     final indexed = List.generate(softmaxScores.length,
             (i) => MapEntry(i, softmaxScores[i]))
         .toList()
@@ -184,9 +311,8 @@ class MlService {
         .take(topK)
         .where((e) => e.value >= _ModelConfig.confidenceThreshold)
         .map((e) {
-      // Index → nama makanan dari database (jika ada)
-      final label = e.key < _foodDatabase.length
-          ? _foodDatabase[e.key].name
+      final label = e.key < _modelLabels.length
+          ? _modelLabels[e.key]
           : 'Makanan #${e.key}';
       return Prediction(label: label, confidence: e.value, index: e.key);
     }).toList();
@@ -203,16 +329,33 @@ class MlService {
 
   FoodItemModel? _lookupFood(String name) {
     final normalized = name.toLowerCase().trim();
+    
+    // Pemetaan khusus (typo dari label model agar cocok ke nama CSV)
+    String lookupName = normalized;
+    if (normalized == "chiken katsu") {
+      lookupName = "chicken katsu";
+    }
+
     try {
+      // Cari kecocokan persis
       return _foodDatabase.firstWhere(
-          (f) => f.name.toLowerCase().trim() == normalized);
+          (f) => f.name.toLowerCase().trim() == lookupName);
     } catch (_) {
-      // Fuzzy fallback: cari yang mengandung kata pertama
-      final firstWord = normalized.split(' ').first;
+      // Fuzzy fallback: cari nama di database yang mengandung kata model
+      final words = lookupName.split(' ');
+      final firstWord = words.first;
       try {
         return _foodDatabase.firstWhere(
             (f) => f.name.toLowerCase().contains(firstWord));
       } catch (_) {
+        // Fallback pencarian mengandung kata manapun
+        for (final word in words) {
+          if (word.length < 3) continue;
+          try {
+            return _foodDatabase.firstWhere(
+                (f) => f.name.toLowerCase().contains(word));
+          } catch (_) {}
+        }
         return null;
       }
     }
@@ -220,12 +363,10 @@ class MlService {
 
   // ─── Simulasi (Fallback) ──────────────────────────────────────────────────
 
-  /// Ambil 3 item acak dari database CSV sebagai fallback.
   MlAnalysisResult _buildSimulatedResult() {
     if (_foodDatabase.isEmpty) return _hardcodedFallback();
 
     final rng = Random();
-    // Pilih 3 item dari indeks berbeda
     final picked = <FoodItemModel>[];
     final usedIdx = <int>{};
     while (picked.length < 3 && usedIdx.length < _foodDatabase.length) {
@@ -325,34 +466,35 @@ class _PreprocessArgs {
   const _PreprocessArgs(this.imageBytes, this.targetSize);
 }
 
-/// Berjalan di isolate terpisah agar UI tidak freeze saat preprocessing gambar.
-/// 
-/// Asumsi model: float32 input, normalized [0,1], shape [1, size, size, 3]
 List<List<List<List<double>>>> _preprocessImageIsolate(
     _PreprocessArgs args) {
   final size = args.targetSize;
+  
+  // 1. Decode compressed JPEG/PNG bytes to raw Image
+  final image = img.decodeImage(args.imageBytes);
+  if (image == null) {
+    throw Exception('Failed to decode JPEG/PNG image bytes');
+  }
 
-  // Decode JPEG/PNG ke bytes raw RGB menggunakan decoding manual sederhana.
-  // Catatan: Untuk produksi gunakan package `image` untuk decode lengkap.
-  // Di sini kita buat tensor dari bytes langsung dengan resize sederhana.
-  final bytes = args.imageBytes;
-  final totalPixels = size * size;
+  // 2. Resize image berkualitas tinggi ke size x size (320x320)
+  final resizedImage = img.copyResize(image, width: size, height: size);
 
-  // Buat buffer float normalized
-  final tensor =
-      List.generate(1, (_) => List.generate(size, (_) => 
-        List.generate(size, (_) => List.filled(3, 0.0))));
+  // 3. Inisialisasi float32 input tensor [1, size, size, 3]
+  final tensor = List.generate(1, (_) => 
+    List.generate(size, (_) => 
+      List.generate(size, (_) => List.filled(3, 0.0))));
 
-  // Distribusikan bytes ke grid size×size
-  // (sampling sederhana — untuk hasil optimal gunakan package `image`)
-  final stride = bytes.length ~/ (totalPixels * 3 + 1);
+  // 4. Copy raw RGB ternormalisasi [0, 1] ke tensor
   for (int y = 0; y < size; y++) {
     for (int x = 0; x < size; x++) {
-      final offset = ((y * size + x) * 3 * stride).clamp(0, bytes.length - 3);
-      tensor[0][y][x][0] = bytes[offset] / 255.0;
-      tensor[0][y][x][1] = bytes[offset + 1] / 255.0;
-      tensor[0][y][x][2] = bytes[offset + 2] / 255.0;
+      final pixel = resizedImage.getPixel(x, y);
+      
+      // Mengakses RGB channel
+      tensor[0][y][x][0] = pixel.r / 255.0; // Red
+      tensor[0][y][x][1] = pixel.g / 255.0; // Green
+      tensor[0][y][x][2] = pixel.b / 255.0; // Blue
     }
   }
+  
   return tensor;
 }

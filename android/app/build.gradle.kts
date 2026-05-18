@@ -8,8 +8,8 @@ plugins {
 android {
     namespace = "com.example.cek_piringku"
     compileSdk = flutter.compileSdkVersion
-    // tflite_flutter membutuhkan NDK versi spesifik
-    ndkVersion = "26.1.10909125"
+    // Menggunakan NDK terbaru sesuai rekomendasi plugin modern
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -25,7 +25,7 @@ android {
         applicationId = "com.example.cek_piringku"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 21 // tflite_flutter membutuhkan minimal API 21
+        minSdk = flutter.minSdkVersion // tflite_flutter membutuhkan minimal API 21
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

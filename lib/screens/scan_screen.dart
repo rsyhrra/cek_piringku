@@ -1,4 +1,4 @@
-
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
@@ -6,6 +6,7 @@ import '../constants/colors.dart';
 import '../services/nutrition_service.dart';
 import '../services/reward_service.dart';
 import '../widgets/nutrition_card.dart';
+import '../services/ml_service.dart';
 
 class ScanScreen extends StatefulWidget {
   final VoidCallback onViewHistory;
@@ -16,16 +17,24 @@ class ScanScreen extends StatefulWidget {
   State<ScanScreen> createState() => _ScanScreenState();
 }
 
-class _ScanScreenState extends State<ScanScreen> {
+class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateMixin {
   CameraController? _controller;
   List<CameraDescription>? _cameras;
   bool _isCameraReady = false;
   bool _hasResult = false;
   bool _isAnalyzing = false;
 
+  // Laser scanner animation (visual only, tidak ada loop inference)
+  late AnimationController _animController;
+
   @override
   void initState() {
     super.initState();
+    _animController = AnimationController(
+      duration: const Duration(seconds: 2),
+      vsync: this,
+    )..repeat(reverse: true);
+
     _initializeCamera();
   }
 
@@ -35,64 +44,47 @@ class _ScanScreenState extends State<ScanScreen> {
       if (_cameras != null && _cameras!.isNotEmpty) {
         _controller = CameraController(
           _cameras![0],
-          ResolutionPreset.medium,
+          ResolutionPreset.high, // High res untuk akurasi inferensi lebih baik
           enableAudio: false,
         );
-
         await _controller!.initialize();
         if (mounted) {
-          setState(() {
-            _isCameraReady = true;
-          });
+          setState(() => _isCameraReady = true);
         }
       } else {
-        // No cameras found, use simulation mode
         debugPrint("No cameras found, entering simulation mode");
-        if (mounted) {
-          setState(() {
-            _isCameraReady = true; // Still mark as ready to show the UI
-          });
-        }
+        if (mounted) setState(() => _isCameraReady = true);
       }
     } catch (e) {
       debugPrint("Camera error: $e");
-      // Error occurred, fallback to simulation mode
-      if (mounted) {
-        setState(() {
-          _isCameraReady = true;
-        });
-      }
+      if (mounted) setState(() => _isCameraReady = true);
     }
   }
 
   @override
   void dispose() {
+    _animController.dispose();
     _controller?.dispose();
     super.dispose();
   }
 
   Future<void> _captureAndAnalyze() async {
-    setState(() {
-      _isAnalyzing = true;
-    });
+    if (_isAnalyzing || _controller == null || !_controller!.value.isInitialized) return;
+
+    setState(() => _isAnalyzing = true);
 
     String imagePath = 'simulated_path';
-
-    // Ambil foto nyata jika kamera tersedia
-    if (_controller != null && _controller!.value.isInitialized) {
-      try {
-        final xFile = await _controller!.takePicture();
-        imagePath = xFile.path;
-      } catch (e) {
-        debugPrint('Gagal capture: $e. Fallback ke simulasi.');
-      }
+    try {
+      final xFile = await _controller!.takePicture();
+      imagePath = xFile.path;
+    } catch (e) {
+      debugPrint('Gagal capture: $e. Fallback ke simulasi.');
     }
 
     if (!mounted) return;
     final nutritionService = Provider.of<NutritionService>(context, listen: false);
     final rewardService = Provider.of<RewardService>(context, listen: false);
 
-    // Analisis via TFLite + CSV (atau simulasi jika path = simulated_path)
     final result = await nutritionService.analyzeMeal(imagePath);
 
     if (!mounted) return;
@@ -102,10 +94,7 @@ class _ScanScreenState extends State<ScanScreen> {
     });
 
     await rewardService.addScanReward(result.isStandardMet);
-
-    if (!result.isStandardMet) {
-      _showAlertBadge();
-    }
+    if (!result.isStandardMet) _showAlertBadge();
   }
 
   void _showAlertBadge() {
@@ -139,7 +128,7 @@ class _ScanScreenState extends State<ScanScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Camera Preview or Simulation Background
+          // 1. Camera Preview / background simulasi
           Positioned.fill(
             child: isUsingCamera 
               ? CameraPreview(_controller!) 
@@ -165,19 +154,19 @@ class _ScanScreenState extends State<ScanScreen> {
                 ),
           ),
 
-          // AI Overlay (Bounding Boxes & Guides)
+          // 2. Laser scanning overlay
           if (!_hasResult) _buildAIOverlay(),
 
-          // Top Header (Calories & Status)
+          // 3. Top Header (Calories & Status)
           _buildHeader(),
 
-          // Bottom Controls
+          // 4. Bottom Controls (Zoom + Live HUD + Capture button)
           _buildBottomControls(),
 
-          // Analysis Result Card (Overlay when finished)
+          // 5. Card Hasil Analisis (Muncul setelah klik capture)
           if (_hasResult) _buildResultOverlay(),
           
-          // Analysis Loading
+          // 6. Spinner penganalisis utama
           if (_isAnalyzing) 
             Container(
               color: Colors.black54,
@@ -187,7 +176,7 @@ class _ScanScreenState extends State<ScanScreen> {
                   children: const [
                     CircularProgressIndicator(color: AppColors.primaryGreen),
                     SizedBox(height: 16),
-                    Text("🔍 Menganalisis Kandungan Gizi...", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    Text("🔍 Memvalidasi & Menyimpan Hasil...", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
@@ -224,33 +213,48 @@ class _ScanScreenState extends State<ScanScreen> {
             ],
           ),
           const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.black26,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: Colors.white24),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Text('ESTIMATED CALORIES', style: TextStyle(color: Colors.white70, fontSize: 10)),
-                    Text('~ 345 kcal', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+          Consumer<NutritionService>(
+            builder: (context, nutritionService, child) {
+              final caloriesToday = nutritionService.todayCalories;
+              final isCompliant = caloriesToday >= 400 && caloriesToday <= 900;
+              return Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.black38,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('TOTAL KALORI HARI INI', style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+                        Text('$caloriesToday kcal', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: caloriesToday == 0
+                            ? Colors.white24
+                            : (isCompliant
+                                ? AppColors.secondaryGreen.withOpacity(0.8)
+                                : AppColors.alertOrange.withOpacity(0.8)),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        caloriesToday == 0
+                            ? 'Ready'
+                            : (isCompliant ? 'Sesuai Standar' : 'Tidak Sesuai'),
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+                      ),
+                    ),
                   ],
                 ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: AppColors.secondaryGreen.withOpacity(0.8),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Text('Compliant', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                ),
-              ],
-            ),
+              );
+            },
           ),
         ],
       ),
@@ -260,56 +264,104 @@ class _ScanScreenState extends State<ScanScreen> {
   Widget _buildAIOverlay() {
     return Stack(
       children: [
-        // Guidance Box (Ompreng Shape)
+        // Laser scanning line moving up & down
         Center(
-          child: Container(
-            width: 300,
-            height: 450,
-            decoration: BoxDecoration(
-              border: Border.all(color: Colors.white38, width: 2),
-              borderRadius: BorderRadius.circular(20),
-            ),
+          child: AnimatedBuilder(
+            animation: _animController,
+            builder: (context, child) {
+              return Stack(
+                children: [
+                  Container(
+                    width: 300,
+                    height: 450,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.white38, width: 2),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                  Positioned(
+                    top: _animController.value * 440 + 5,
+                    left: 10,
+                    right: 10,
+                    child: Container(
+                      height: 3,
+                      decoration: BoxDecoration(
+                        color: AppColors.primaryGreen,
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.primaryGreen.withOpacity(0.8),
+                            blurRadius: 8,
+                            spreadRadius: 2,
+                          )
+                        ],
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
         ),
-        
-        // Mock Bounding Boxes
-        _buildBoundingBox(120, 200, "Telur Rebus 50g", true),
-        _buildBoundingBox(160, 380, "Nasi 150g", true),
-        _buildBoundingBox(240, 250, "Sayur Hijau", false),
       ],
     );
   }
 
-  Widget _buildBoundingBox(double top, double left, String label, bool isOk) {
-    return Positioned(
-      top: top,
-      left: left,
+  Widget _buildLiveHudCard() {
+    if (_hasResult) return const SizedBox();
+    
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 24),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.65),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white12, width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 10,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: isOk ? AppColors.primaryGreen : AppColors.alertOrange,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(isOk ? Icons.check_circle : Icons.warning, color: Colors.white, size: 12),
-                const SizedBox(width: 4),
-                Text(label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
-              ],
-            ),
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: AppColors.primaryGreen,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.primaryGreen.withOpacity(0.8),
+                      blurRadius: 6,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                "AI SCANNER SIAP",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.5,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 4),
-          Container(
-            width: 80,
-            height: 80,
-            decoration: BoxDecoration(
-              border: Border.all(color: isOk ? AppColors.primaryGreen : AppColors.alertOrange, width: 2),
-              borderRadius: BorderRadius.circular(12),
-            ),
+          const SizedBox(height: 10),
+          const Text(
+            "📸 Posisikan piring di dalam kotak, lalu tekan tombol Capture",
+            style: TextStyle(color: Colors.white70, fontSize: 13),
           ),
         ],
       ),
@@ -323,6 +375,10 @@ class _ScanScreenState extends State<ScanScreen> {
       right: 0,
       child: Column(
         children: [
+          // Sleek Sci-Fi Live Scanner HUD Card
+          _buildLiveHudCard(),
+          const SizedBox(height: 20),
+
           // Zoom controls
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -334,7 +390,7 @@ class _ScanScreenState extends State<ScanScreen> {
               _buildZoomBtn("2x"),
             ],
           ),
-          const SizedBox(height: 30),
+          const SizedBox(height: 24),
           
           // Capture button
           Row(
@@ -362,10 +418,10 @@ class _ScanScreenState extends State<ScanScreen> {
               const CircleAvatar(backgroundColor: Colors.white24, child: Icon(Icons.flip_camera_ios_outlined, color: Colors.white)),
             ],
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
           const Text(
-            "Tahan posisi piring di dalam kotak panduan",
-            style: TextStyle(color: Colors.white70, fontSize: 14),
+            "Tahan piring makanan lalu tekan Capture",
+            style: TextStyle(color: Colors.white70, fontSize: 13),
           ),
         ],
       ),
