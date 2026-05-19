@@ -88,6 +88,20 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     final result = await nutritionService.analyzeMeal(imagePath);
 
     if (!mounted) return;
+
+    if (result.foodItems.contains('Tidak ada makanan terdeteksi')) {
+      setState(() {
+        _isAnalyzing = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Oups! Tidak ada makanan terdeteksi. Silakan coba scan ulang dengan pencahayaan yang lebih baik."),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
     setState(() {
       _isAnalyzing = false;
       _hasResult = true;

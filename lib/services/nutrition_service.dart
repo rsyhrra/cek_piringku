@@ -91,8 +91,11 @@ class NutritionService extends ChangeNotifier {
         isStandardMet: result.isStandardMet,
       );
 
-      _scans.insert(0, newScan);
-      await _db.insertScan(newScan);
+      // Jangan simpan ke history/DB jika simulasi atau tidak ada makanan terdeteksi
+      if (!result.detectedFoods.contains('Tidak ada makanan terdeteksi')) {
+        _scans.insert(0, newScan);
+        await _db.insertScan(newScan);
+      }
 
       return newScan;
     } finally {

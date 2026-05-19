@@ -232,16 +232,27 @@ class MlService {
       debugPrint('[MlService] Output shape: [$dim1, $dim2], isTransposed=$isTransposed, channels=$channels, anchors=$anchors');
 
       // Kumpulkan skor TERTINGGI per kelas di semua anchors
-      final classMaxScores = List.filled(_modelLabels.length, -999.0);
+      final classMaxScores = List.filled(_modelLabels.length, 0.0); // ganti -999.0 jadi 0.0
 
       for (int a = 0; a < anchors; a++) {
+        // Ambil object confidence dulu (channel index 4)
+        final double objConf = _sigmoid(isTransposed
+            ? rawPreds[0][4][a]
+            : rawPreds[0][a][4]);
+
+        // Skip anchor ini kalau object confidence rendah
+        if (objConf < 0.3) continue;
+
         for (int c = 0; c < _modelLabels.length; c++) {
-          final int channelIdx = 4 + c; // Lewati 4 koordinat box awal
+          final int channelIdx = 4 + c;
           if (channelIdx >= channels) break;
 
-          final double score = isTransposed
+          final double rawScore = isTransposed
               ? rawPreds[0][channelIdx][a]
               : rawPreds[0][a][channelIdx];
+
+          // Kalikan obj confidence dengan class confidence
+          final double score = objConf * _sigmoid(rawScore);
 
           if (score > classMaxScores[c]) {
             classMaxScores[c] = score;
@@ -262,26 +273,34 @@ class MlService {
 
       final result = <Prediction>[];
 
-      // Ambil top-1 SELALU (item utama, apapun score-nya)
+      // Minimum threshold yang realistis
+      const double minThreshold = 0.30;
+
       final top1 = sorted.first;
+
+      // Jangan paksa keluar kalau tidak cukup yakin
+      if (top1.value < minThreshold) {
+        debugPrint('[MlService] Tidak ada deteksi yang cukup yakin (max=${top1.value.toStringAsFixed(3)})');
+        return []; // Fallback ke simulasi
+      }
+
       result.add(Prediction(
         label: _modelLabels[top1.key],
         confidence: top1.value,
         index: top1.key,
       ));
 
-      // Tambahkan item ke-2 dan ke-3 HANYA jika score mereka > 0.50 DAN
-      // sangat dekat (selisih <= 0.20) dengan item utama
+      // Tambah item ke-2 dan ke-3 hanya kalau benar-benar yakin
       for (int i = 1; i < sorted.length && result.length < 3; i++) {
         final entry = sorted[i];
-        if (entry.value >= 0.50 && (top1.value - entry.value) <= 0.20) {
+        if (entry.value >= 0.35 && (top1.value - entry.value) <= 0.15) {
           result.add(Prediction(
             label: _modelLabels[entry.key],
             confidence: entry.value,
             index: entry.key,
           ));
         } else {
-          break; // Sudah tidak ada yang cukup tinggi
+          break;
         }
       }
 
@@ -325,40 +344,41 @@ class MlService {
     return exps.map((v) => v / sum).toList();
   }
 
+  // Tambahkan fungsi ini
+  double _sigmoid(double x) => 1.0 / (1.0 + exp(-x));
+
   // ─── Lookup Dataset ───────────────────────────────────────────────────────
 
   FoodItemModel? _lookupFood(String name) {
     final normalized = name.toLowerCase().trim();
-    
-    // Pemetaan khusus (typo dari label model agar cocok ke nama CSV)
-    String lookupName = normalized;
-    if (normalized == "chiken katsu") {
-      lookupName = "chicken katsu";
-    }
 
+    // Mapping khusus typo
+    final mappings = {
+      'chiken katsu': 'chicken katsu',
+      'pisang lampung': 'pisang',
+      'tahu crispy': 'tahu goreng',
+      'tempe sagu': 'tempe goreng',
+    };
+    String lookupName = mappings[normalized] ?? normalized;
+
+    // 1. Exact match dulu
     try {
-      // Cari kecocokan persis
       return _foodDatabase.firstWhere(
-          (f) => f.name.toLowerCase().trim() == lookupName);
-    } catch (_) {
-      // Fuzzy fallback: cari nama di database yang mengandung kata model
-      final words = lookupName.split(' ');
-      final firstWord = words.first;
+        (f) => f.name.toLowerCase().trim() == lookupName);
+    } catch (_) {}
+
+    // 2. Partial match - HANYA kalau kata pertama >= 4 huruf
+    final words = lookupName.split(' ');
+    for (final word in words) {
+      if (word.length < 4) continue; // Skip kata pendek (mencegah false match)
       try {
         return _foodDatabase.firstWhere(
-            (f) => f.name.toLowerCase().contains(firstWord));
-      } catch (_) {
-        // Fallback pencarian mengandung kata manapun
-        for (final word in words) {
-          if (word.length < 3) continue;
-          try {
-            return _foodDatabase.firstWhere(
-                (f) => f.name.toLowerCase().contains(word));
-          } catch (_) {}
-        }
-        return null;
-      }
+          (f) => f.name.toLowerCase().trim().startsWith(word));
+      } catch (_) {}
     }
+
+    debugPrint('[MlService] Tidak ditemukan di CSV: "$name"');
+    return null;
   }
 
   // ─── Simulasi (Fallback) ──────────────────────────────────────────────────

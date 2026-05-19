@@ -91,11 +91,11 @@ class NutritionCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 20),
-              Row(
+               Row(
                 children: [
                    _buildLargeInfo("TOTAL ENERGI", "${scanResult.calories} kkal"),
                    const Spacer(),
-                   _buildLargeInfo("SKOR KEPATUHAN", "98 %", isGreen: true),
+                   _buildLargeInfo("SKOR KEPATUHAN", scanResult.calories > 0 ? "98 %" : "0 %", isGreen: scanResult.calories > 0),
                 ],
               ),
               const SizedBox(height: 24),
@@ -105,7 +105,7 @@ class NutritionCard extends StatelessWidget {
               const SizedBox(height: 16),
               CustomProgressBar(label: "Lemak", current: scanResult.fats, max: 20, color: AppColors.alertRed),
               const SizedBox(height: 16),
-              CustomProgressBar(label: "Serat & Vitamin", current: 12, max: 10, color: Colors.blue),
+              CustomProgressBar(label: "Serat & Vitamin", current: scanResult.calories > 0 ? 12 : 0, max: 10, color: Colors.blue),
             ],
           ),
         ),
