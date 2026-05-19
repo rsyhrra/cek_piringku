@@ -7,6 +7,8 @@ import '../services/nutrition_service.dart';
 import '../services/reward_service.dart';
 import '../widgets/nutrition_card.dart';
 import '../services/ml_service.dart';
+import '../services/roboflow_service.dart';
+import '../widgets/mask_painter.dart';
 
 class ScanScreen extends StatefulWidget {
   final VoidCallback onViewHistory;
@@ -23,6 +25,11 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
   bool _isCameraReady = false;
   bool _hasResult = false;
   bool _isAnalyzing = false;
+
+  // Tambah variabel di state
+  File? _capturedImage;
+  List<SegmentationResult> _segmentations = [];
+  Size _imageSize = const Size(640, 640);
 
   // Laser scanner animation (visual only, tidak ada loop inference)
   late AnimationController _animController;
@@ -73,42 +80,56 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
 
     setState(() => _isAnalyzing = true);
 
-    String imagePath = 'simulated_path';
     try {
       final xFile = await _controller!.takePicture();
-      imagePath = xFile.path;
-    } catch (e) {
-      debugPrint('Gagal capture: $e. Fallback ke simulasi.');
-    }
+      final imageFile = File(xFile.path);
 
-    if (!mounted) return;
-    final nutritionService = Provider.of<NutritionService>(context, listen: false);
-    final rewardService = Provider.of<RewardService>(context, listen: false);
+      // Dapatkan ukuran gambar asli
+      final decodedImage = await decodeImageFromList(
+          await imageFile.readAsBytes());
+      final imgSize = Size(
+          decodedImage.width.toDouble(),
+          decodedImage.height.toDouble());
 
-    final result = await nutritionService.analyzeMeal(imagePath);
+      // Kirim ke Roboflow untuk segmentasi
+      final segments =
+          await RoboflowService.detectWithMask(imageFile);
 
-    if (!mounted) return;
+      if (!mounted) return;
+      final nutritionService = Provider.of<NutritionService>(context, listen: false);
+      final rewardService = Provider.of<RewardService>(context, listen: false);
 
-    if (result.foodItems.contains('Tidak ada makanan terdeteksi')) {
+      final result = await nutritionService.analyzeMeal(xFile.path);
+
+      if (!mounted) return;
+
+      if (result.foodItems.contains('Tidak ada makanan terdeteksi')) {
+        setState(() {
+          _isAnalyzing = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Oups! Tidak ada makanan terdeteksi. Silakan coba scan ulang dengan pencahayaan yang lebih baik."),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+        return;
+      }
+
       setState(() {
+        _capturedImage = imageFile;
+        _segmentations = segments;
+        _imageSize = imgSize;
         _isAnalyzing = false;
+        _hasResult = true;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Oups! Tidak ada makanan terdeteksi. Silakan coba scan ulang dengan pencahayaan yang lebih baik."),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
-      return;
+
+      await rewardService.addScanReward(result.isStandardMet);
+      if (!result.isStandardMet) _showAlertBadge();
+    } catch (e) {
+      debugPrint('Error: $e');
+      if (mounted) setState(() => _isAnalyzing = false);
     }
-
-    setState(() {
-      _isAnalyzing = false;
-      _hasResult = true;
-    });
-
-    await rewardService.addScanReward(result.isStandardMet);
-    if (!result.isStandardMet) _showAlertBadge();
   }
 
   void _showAlertBadge() {
@@ -144,8 +165,10 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
         children: [
           // 1. Camera Preview / background simulasi
           Positioned.fill(
-            child: isUsingCamera 
-              ? CameraPreview(_controller!) 
+            child: (_hasResult && _capturedImage != null)
+              ? _buildSegmentationView()
+              : isUsingCamera 
+                ? CameraPreview(_controller!) 
               : Container(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -453,9 +476,32 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     );
   }
 
+  Widget _buildSegmentationView() {
+    if (_capturedImage == null) return const SizedBox();
+
+    return Stack(
+      children: [
+        // Gambar asli
+        SizedBox.expand(
+          child: Image.file(_capturedImage!, fit: BoxFit.cover),
+        ),
+
+        // Overlay segmentasi mask
+        Positioned.fill(
+          child: CustomPaint(
+            painter: MaskPainter(
+              detections: _segmentations,
+              imageSize: _imageSize,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildResultOverlay() {
     return Container(
-      color: Colors.black.withOpacity(0.85),
+      color: Colors.black.withOpacity(0.5), // Ubah opacity agar gambar terlihat
       padding: const EdgeInsets.all(20),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
